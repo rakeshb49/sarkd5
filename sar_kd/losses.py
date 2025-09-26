@@ -14,7 +14,7 @@ def kd_kl_loss(student_logits: torch.Tensor, teacher_logits: torch.Tensor, tempe
 
 def ce_loss(student_logits: torch.Tensor, labels: torch.Tensor, ignore_index: int = -100) -> torch.Tensor:
     vocab = student_logits.size(-1)
-    return F.cross_entropy(student_logits.view(-1, vocab), labels.view(-1), ignore_index=ignore_index)
+    return F.cross_entropy(student_logits.reshape(-1, vocab), labels.reshape(-1), ignore_index=ignore_index)
 
 
 def router_anchor_l2(current: Dict[str, torch.Tensor], initial: Dict[str, torch.Tensor]) -> torch.Tensor:

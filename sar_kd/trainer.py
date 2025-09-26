@@ -5,7 +5,8 @@ from typing import Dict, Iterable, List, Optional, Tuple
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from transformers import DataCollatorForLanguageModeling, PreTrainedModel
+from transformers import PreTrainedModel
+from transformers.data.data_collator import DataCollatorForLanguageModeling
 
 from .losses import (
     ce_loss,

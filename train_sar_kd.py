@@ -7,7 +7,7 @@ from datetime import datetime, UTC
 
 import torch
 from torch.utils.data import DataLoader
-from transformers import DataCollatorForLanguageModeling
+from transformers.data.data_collator import DataCollatorForLanguageModeling
 
 from sar_kd.data import build_text_datasets, DualTokenizerCollator
 from sar_kd.models import load_teacher_student
