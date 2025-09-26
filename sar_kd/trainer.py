@@ -206,12 +206,25 @@ class SARDistiller:
                     did_backward = True
 
                 if (step + 1) % grad_accum_steps == 0:
-                    if did_backward and scaler.is_enabled():
-                        scaler.unscale_(self.optimizer)
-                        torch.nn.utils.clip_grad_norm_(self.student.parameters(), self.config.max_grad_norm)
-                        torch.nn.utils.clip_grad_norm_(self.router_params, self.config.max_grad_norm)
-                        scaler.step(self.optimizer)
-                        scaler.update()
+                    if did_backward:
+                        if scaler.is_enabled():
+                            # Check if any parameters have FP16 gradients to avoid unscaling error
+                            has_fp16_grads = any(
+                                p.grad is not None and p.grad.dtype == torch.float16
+                                for p in list(self.student.parameters()) + list(self.router_params)
+                            )
+
+                            if not has_fp16_grads:
+                                scaler.unscale_(self.optimizer)
+                                torch.nn.utils.clip_grad_norm_(self.student.parameters(), self.config.max_grad_norm)
+                                torch.nn.utils.clip_grad_norm_(self.router_params, self.config.max_grad_norm)
+
+                            scaler.step(self.optimizer)
+                            scaler.update()
+                        else:
+                            torch.nn.utils.clip_grad_norm_(self.student.parameters(), self.config.max_grad_norm)
+                            torch.nn.utils.clip_grad_norm_(self.router_params, self.config.max_grad_norm)
+                            self.optimizer.step()
                     # Always zero grads at accumulation boundary
                     self.optimizer.zero_grad(set_to_none=True)
 

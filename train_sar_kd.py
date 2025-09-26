@@ -35,6 +35,7 @@ def parse_args():
     p.add_argument('--router_entropy_weight', type=float, default=1e-4)
     p.add_argument('--weight_decay', type=float, default=0.0)
     p.add_argument('--max_grad_norm', type=float, default=1.0)
+    p.add_argument('--model_dtype', type=str, default='float32', choices=['float16', 'float32'], help='Model precision: float16 for memory efficiency, float32 for stability')
     p.add_argument('--seed', type=int, default=42)
     p.add_argument('--output_dir', type=str, default='outputs/sar_kd')
     return p.parse_args()
@@ -49,7 +50,8 @@ def main():
     torch.cuda.manual_seed_all(args.seed)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+    dtype = torch.float16 if args.model_dtype == 'float16' else torch.float32
+    print(f"Using model dtype: {dtype}")
     # Enable TF32 when on CUDA and better matmul precision on CPU
     try:
         if torch.cuda.is_available():
