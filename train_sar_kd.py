@@ -3,7 +3,7 @@ import json
 import os
 os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
 os.environ.setdefault("TRANSFORMERS_NO_FLAX", "1")
-from datetime import datetime
+from datetime import datetime, UTC
 
 import torch
 from torch.utils.data import DataLoader
@@ -50,6 +50,15 @@ def main():
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+    # Enable TF32 when on CUDA and better matmul precision on CPU
+    try:
+        if torch.cuda.is_available():
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+        else:
+            torch.set_float32_matmul_precision('high')
+    except Exception:
+        pass
 
     teacher, student, teacher_tok, student_tok = load_teacher_student(
         args.teacher_model, args.student_model, dtype, device
@@ -117,7 +126,7 @@ def main():
         torch.save(router_state, os.path.join(step_dir, 'router_update.pt'))
 
     def log_callback(metrics: dict):
-        ts = datetime.utcnow().isoformat()
+        ts = datetime.now(UTC).isoformat()
         print(json.dumps({"ts": ts, **metrics}))
 
     distiller.train(

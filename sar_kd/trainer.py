@@ -88,7 +88,7 @@ class SARDistiller:
         step = 0
         total_tokens = 0
         running_loss = 0.0
-        scaler = torch.cuda.amp.GradScaler(enabled=torch.cuda.is_available())
+        scaler = torch.amp.GradScaler('cuda', enabled=torch.cuda.is_available())
 
         while step < steps:
             for batch in train_loader:
@@ -106,7 +106,7 @@ class SARDistiller:
                     if attention_mask is not None:
                         attention_mask = attention_mask.to(self.device)
 
-                with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+                with torch.amp.autocast('cuda', enabled=torch.cuda.is_available()):
                     if 'teacher_input_ids' in batch:
                         # dual path
                         t_ids = batch['teacher_input_ids'].to(self.device)
@@ -199,15 +199,19 @@ class SARDistiller:
                         loss = torch.tensor(0.0, device=self.device)
 
                 loss = loss / grad_accum_steps
+                did_backward = False
                 if loss.requires_grad:
                     scaler.scale(loss).backward()
+                    did_backward = True
 
-                if (step + 1) % grad_accum_steps == 0 and loss.requires_grad:
-                    scaler.unscale_(self.optimizer)
-                    torch.nn.utils.clip_grad_norm_(self.student.parameters(), self.config.max_grad_norm)
-                    torch.nn.utils.clip_grad_norm_(self.router_params, self.config.max_grad_norm)
-                    scaler.step(self.optimizer)
-                    scaler.update()
+                if (step + 1) % grad_accum_steps == 0:
+                    if did_backward and scaler.is_enabled():
+                        scaler.unscale_(self.optimizer)
+                        torch.nn.utils.clip_grad_norm_(self.student.parameters(), self.config.max_grad_norm)
+                        torch.nn.utils.clip_grad_norm_(self.router_params, self.config.max_grad_norm)
+                        scaler.step(self.optimizer)
+                        scaler.update()
+                    # Always zero grads at accumulation boundary
                     self.optimizer.zero_grad(set_to_none=True)
 
                 running_loss += loss.item() * grad_accum_steps

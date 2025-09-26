@@ -42,13 +42,15 @@ def load_teacher_student(
         trust_remote_code=True,
     )
 
-    # Ensure pad_token_id in configs
+    # Ensure pad_token_id in configs and disable cache when training
     try:
         teacher.config.pad_token_id = teacher_tok.pad_token_id
+        teacher.config.use_cache = False
     except Exception:
         pass
     try:
         student.config.pad_token_id = student_tok.pad_token_id
+        student.config.use_cache = False
     except Exception:
         pass
 
