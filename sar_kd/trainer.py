@@ -89,7 +89,21 @@ class SARDistiller:
         step = 0
         total_tokens = 0
         running_loss = 0.0
-        scaler = torch.amp.GradScaler('cuda', enabled=torch.cuda.is_available())
+        # Disable scaler for FP16 models to avoid gradient scaling issues
+        use_scaler = torch.cuda.is_available() and not any(
+            p.dtype == torch.float16 for p in list(self.student.parameters()) + list(self.router_params)
+        )
+        scaler = torch.amp.GradScaler('cuda', enabled=use_scaler)
+
+        # Print scaler status for user information
+        if torch.cuda.is_available():
+            has_fp16_params = any(p.dtype == torch.float16 for p in list(self.student.parameters()) + list(self.router_params))
+            if has_fp16_params:
+                print("FP16 models detected - gradient scaler disabled to avoid scaling errors")
+            else:
+                print("FP32 models detected - gradient scaler enabled for mixed precision training")
+        else:
+            print("CUDA not available - gradient scaler disabled")
 
         while step < steps:
             for batch in train_loader:
@@ -208,20 +222,14 @@ class SARDistiller:
                 if (step + 1) % grad_accum_steps == 0:
                     if did_backward:
                         if scaler.is_enabled():
-                            # Check if any parameters have FP16 gradients to avoid unscaling error
-                            has_fp16_grads = any(
-                                p.grad is not None and p.grad.dtype == torch.float16
-                                for p in list(self.student.parameters()) + list(self.router_params)
-                            )
-
-                            if not has_fp16_grads:
-                                scaler.unscale_(self.optimizer)
-                                torch.nn.utils.clip_grad_norm_(self.student.parameters(), self.config.max_grad_norm)
-                                torch.nn.utils.clip_grad_norm_(self.router_params, self.config.max_grad_norm)
-
+                            # Standard AMP workflow (scaler disabled for FP16 models)
+                            scaler.unscale_(self.optimizer)
+                            torch.nn.utils.clip_grad_norm_(self.student.parameters(), self.config.max_grad_norm)
+                            torch.nn.utils.clip_grad_norm_(self.router_params, self.config.max_grad_norm)
                             scaler.step(self.optimizer)
                             scaler.update()
                         else:
+                            # Manual step without scaler (for FP16 models or CPU)
                             torch.nn.utils.clip_grad_norm_(self.student.parameters(), self.config.max_grad_norm)
                             torch.nn.utils.clip_grad_norm_(self.router_params, self.config.max_grad_norm)
                             self.optimizer.step()
