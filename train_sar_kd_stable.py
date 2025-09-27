@@ -414,11 +414,16 @@ class StableTrainer:
                             print(f"  Skipping optimizer step: grad_norm={grad_norm:.4f}")
                             self.distiller.optimizer.zero_grad()
                             continue
-                    if hasattr(self.distiller, 'router_params'):
-                        torch.nn.utils.clip_grad_norm_(self.distiller.router_params, self.distiller.config.max_grad_norm)
-                    self.distiller.optimizer.step()
 
-                self.distiller.optimizer.zero_grad(set_to_none=True)
+                        if hasattr(self.distiller, 'router_params'):
+                            torch.nn.utils.clip_grad_norm_(self.distiller.router_params, self.distiller.config.max_grad_norm)
+                        self.distiller.optimizer.step()
+
+                    self.distiller.optimizer.zero_grad()
+
+                except Exception as e:
+                    print(f"  Optimizer step failed at step {step}: {e}")
+                    self.distiller.optimizer.zero_grad()
 
                 # Step scheduler
                 if self.distiller.scheduler is not None:
