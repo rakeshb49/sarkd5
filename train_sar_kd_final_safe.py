@@ -160,14 +160,14 @@ class FinalSafeEvaluator:
                                 continue
 
                             loss_fct = nn.CrossEntropyLoss(reduction='none')
-                            losses = loss_fct(logits.view(-1, logits.size(-1)), targets.view(-1))
+                            losses = loss_fct(logits.reshape(-1, logits.size(-1)), targets.reshape(-1))
 
                             # Check losses before processing
                             if torch.isnan(losses).any() or torch.isinf(losses).any():
                                 print(f"    Warning: NaN/Inf in raw losses batch {batch_idx}, skipping")
                                 continue
 
-                            losses = losses.view(targets.shape)
+                            losses = losses.reshape(targets.shape)
                             masked_losses = losses * valid_mask.float()
                             batch_loss = masked_losses.sum() / valid_mask.sum()
 
@@ -262,14 +262,14 @@ class FinalSafeTrainer:
                     return None
 
                 loss_fct = nn.CrossEntropyLoss(reduction='none')
-                ce_losses = loss_fct(student_logits.view(-1, student_logits.size(-1)), target_labels.view(-1))
+                ce_losses = loss_fct(student_logits.reshape(-1, student_logits.size(-1)), target_labels.reshape(-1))
 
                 # Check raw losses
                 if torch.isnan(ce_losses).any() or torch.isinf(ce_losses).any():
                     print("  Warning: NaN/Inf in raw CE losses, skipping batch")
                     return None
 
-                ce_losses = ce_losses.view(target_labels.shape)
+                ce_losses = ce_losses.reshape(target_labels.shape)
                 masked_ce = ce_losses * valid_mask.float()
                 ce = masked_ce.sum() / valid_mask.sum()
 
