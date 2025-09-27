@@ -56,8 +56,10 @@ def main():
     torch.cuda.manual_seed_all(args.seed)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    dtype = torch.float16 if args.model_dtype == 'float16' else torch.float32
-    print(f"Using model dtype: {dtype}")
+    # For mixed precision, keep model parameters in FP32 and use autocast for FP16 computations
+    dtype = torch.float32  # Always use FP32 for model parameters
+    use_fp16 = args.model_dtype == 'float16'
+    print(f"Using mixed precision training: {use_fp16} (model params: FP32, computations: {'FP16' if use_fp16 else 'FP32'})")
     # Enable TF32 when on CUDA and better matmul precision on CPU
     try:
         if torch.cuda.is_available():
@@ -114,6 +116,7 @@ def main():
         warmup_steps=args.warmup_steps,
         scheduler_type=args.scheduler_type,
         total_steps=args.train_steps,
+        use_fp16=use_fp16,
     )
 
     distiller = SARDistiller(teacher, student, device, cfg, tokenizers_compatible=same_tok, router_patterns=args.router_patterns)

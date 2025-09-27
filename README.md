@@ -46,8 +46,8 @@ On Kaggle P100 (16GB), this configuration keeps memory usage moderate by using s
 
 For GPUs with limited memory (8GB or less), use these memory-saving techniques:
 
-### FP16 Mixed Precision Training
-Use `--model_dtype float16` to reduce memory usage by ~50%:
+### Mixed Precision Training (FP16)
+Use `--model_dtype float16` for mixed precision training (FP32 parameters, FP16 computations) to reduce memory usage by ~50%:
 
 ```bash
 python train_sar_kd.py \
@@ -91,19 +91,21 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 def estimate_memory(model_name, dtype_str='float32'):
-    dtype = torch.float16 if dtype_str == 'float16' else torch.float32
-    print(f'Estimating memory for {model_name} with {dtype_str}...')
+    # Mixed precision: parameters in FP32, computations in FP16
+    dtype = torch.float32  # Parameters always in FP32 for mixed precision
+    use_fp16 = dtype_str == 'float16'
+    print(f'Estimating memory for {model_name} with {"mixed precision" if use_fp16 else "FP32"}...')
     
     try:
         model = AutoModelForCausalLM.from_pretrained(
             model_name, torch_dtype=dtype, device_map='cpu'
         )
         param_count = sum(p.numel() for p in model.parameters())
-        bytes_per_param = 2 if dtype == torch.float16 else 4
+        bytes_per_param = 4  # Always FP32 for parameters
         model_size_gb = (param_count * bytes_per_param) / (1024**3)
         
-        # Rough estimates including gradients, optimizer states, activations
-        training_multiplier = 4 if dtype == torch.float32 else 2.5
+        # Mixed precision saves memory on activations and intermediate computations
+        training_multiplier = 4 if not use_fp16 else 2.5
         total_estimate = model_size_gb * training_multiplier
         
         print(f'  Parameters: {param_count:,}')
@@ -114,7 +116,7 @@ def estimate_memory(model_name, dtype_str='float32'):
         print(f'  Error: {e}')
         return None
 
-# Estimate both models
+# Estimate both models with mixed precision
 teacher_mem = estimate_memory('huihui-ai/Huihui-MoE-1B-A0.6B', 'float16')
 student_mem = estimate_memory('HuggingFaceTB/SmolLM-135M', 'float16')
 
@@ -162,11 +164,12 @@ python train_sar_kd.py \
 ```
 
 ### Advanced Memory Saving Tips
+- **Mixed precision**: `--model_dtype float16` uses FP16 computations with FP32 parameters for stability
 - **Gradient accumulation**: Use higher `--grad_accum_steps` to reduce per-step memory
 - **Sequence length**: Start with `--block_size 256`, increase gradually
 - **Batch size**: Keep `--per_device_batch_size 1` for maximum memory savings
 - **Router-only training**: Only router parameters are trained, reducing optimizer memory
-- **Automatic mixed precision**: FP16 computations with FP32 master weights
+- **Gradient scaling**: Automatic gradient scaling prevents underflow in mixed precision
 
 Outputs:
 - Student model: saved to `--output_dir/student/`
@@ -186,7 +189,7 @@ Additional options:
 --warmup_steps 100                # Number of warmup steps
 --scheduler_type cosine           # Scheduler type: linear or cosine
 --router_patterns gate router     # Custom regex patterns for router discovery
---model_dtype float16             # Use FP16 for memory efficiency
+--model_dtype float16             # Use mixed precision (FP16 computations, FP32 parameters)
 --save_steps 500                  # Save model every N steps
 ```
 

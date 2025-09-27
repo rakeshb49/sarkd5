@@ -34,6 +34,7 @@ class SARConfig:
     warmup_steps: int = 100
     scheduler_type: str = 'cosine'
     total_steps: int = 1000
+    use_fp16: bool = False
 
 
 class SARDistiller:
@@ -51,6 +52,7 @@ class SARDistiller:
         self.device = device
         self.config = config
         self.same_tok = tokenizers_compatible
+        self.use_fp16 = config.use_fp16
 
         self.router_linears = collect_router_linears(self.teacher, custom_patterns=router_patterns, verbose=True)
         self.router_params = freeze_all_but_router(self.teacher, self.router_linears)
@@ -111,17 +113,16 @@ class SARDistiller:
         step = 0
         total_tokens = 0
         running_loss = 0.0
-        # Enable scaler for mixed precision training, especially important with FP16 parameters
-        use_scaler = torch.cuda.is_available()
+        # Enable scaler for mixed precision training
+        use_scaler = torch.cuda.is_available() and self.use_fp16
         scaler = torch.amp.GradScaler('cuda', enabled=use_scaler)
 
         # Print scaler status for user information
         if torch.cuda.is_available():
-            has_fp16_params = any(p.dtype == torch.float16 for p in list(self.student.parameters()) + list(self.router_params))
-            if has_fp16_params:
-                print("FP16 models detected - gradient scaler enabled to prevent gradient underflow")
+            if self.use_fp16:
+                print("Mixed precision training enabled - FP16 computations with FP32 parameters and gradient scaling")
             else:
-                print("FP32 models detected - gradient scaler enabled for mixed precision training")
+                print("FP32 training - gradient scaler disabled")
         else:
             print("CUDA not available - gradient scaler disabled")
 
@@ -141,7 +142,9 @@ class SARDistiller:
                     if attention_mask is not None:
                         attention_mask = attention_mask.to(self.device)
 
-                with torch.amp.autocast('cuda', enabled=torch.cuda.is_available()):
+                # Use autocast only when CUDA is available and FP16 is requested
+                autocast_enabled = torch.cuda.is_available() and self.use_fp16
+                with torch.amp.autocast('cuda', enabled=autocast_enabled):
                     if 'teacher_input_ids' in batch:
                         # dual path
                         t_ids = batch['teacher_input_ids'].to(self.device)
@@ -261,7 +264,10 @@ class SARDistiller:
                 loss = loss / grad_accum_steps
                 did_backward = False
                 if loss.requires_grad:
-                    scaler.scale(loss).backward()
+                    if use_scaler:
+                        scaler.scale(loss).backward()
+                    else:
+                        loss.backward()
                     did_backward = True
 
                 if (step + 1) % grad_accum_steps == 0:
