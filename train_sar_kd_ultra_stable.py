@@ -28,8 +28,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from transformers import (
     AutoTokenizer, AutoModelForCausalLM,
-    DataCollatorForLanguageModeling,
-    get_cosine_schedule_with_warmup
+    DataCollatorForLanguageModeling
 )
 from datasets import load_dataset
 
@@ -651,36 +650,15 @@ def main():
         max_grad_norm=args.max_grad_norm,
         use_scheduler=args.use_scheduler,
         warmup_steps=min(100, args.train_steps // 10),  # Conservative warmup
+        scheduler_type='cosine',
+        total_steps=args.train_steps,
         use_fp16=use_fp16,
+        offload_teacher_to_cpu=args.offload_teacher_to_cpu,
+        clear_cache_every_step=args.clear_cache_every_step,
     )
 
     print("⚗️ Creating ultra-stable distiller...")
-    distiller = SARDistiller(teacher, student, cfg, device)
-
-    # Setup ultra-stable optimizer with enhanced epsilon for FP16
-    distiller.optimizer = torch.optim.AdamW(
-        distiller.student.parameters(),
-        lr=cfg.student_lr,
-        weight_decay=cfg.weight_decay,
-        eps=1e-8,  # More stable for FP16
-        betas=(0.9, 0.95)  # More stable betas
-    )
-
-    # Setup scheduler with conservative settings
-    if cfg.use_scheduler:
-        print("Using ultra-conservative cosine learning rate scheduler")
-        distiller.scheduler = get_cosine_schedule_with_warmup(
-            distiller.optimizer,
-            num_warmup_steps=cfg.warmup_steps,
-            num_training_steps=args.train_steps,
-            num_cycles=0.5,  # Gentler cosine decay
-            last_epoch=-1,
-        )
-
-    # Move teacher to CPU for memory efficiency
-    if args.offload_teacher_to_cpu:
-        print("Moving teacher model to CPU for memory optimization")
-        distiller.teacher.cpu()
+    distiller = SARDistiller(teacher, student, device, cfg)
 
     print_memory_info("After setup", device)
 
