@@ -284,7 +284,28 @@ class StableTrainer:
 
         # Mixed precision setup
         use_scaler = torch.cuda.is_available() and self.distiller.use_fp16
+
+        # Additional safety check: disable scaler if any parameters are FP16
+        has_fp16_params = any(p.dtype == torch.float16 for p in self.distiller.student.parameters())
+        if hasattr(self.distiller, 'router_params') and self.distiller.router_params:
+            has_fp16_params = has_fp16_params or any(p.dtype == torch.float16 for p in self.distiller.router_params)
+
+        if has_fp16_params and use_scaler:
+            print("WARNING: FP16 parameters detected - disabling gradient scaler to prevent errors")
+            use_scaler = False
+
         scaler = torch.amp.GradScaler('cuda', enabled=use_scaler)
+
+        # Print scaler status for user information
+        if torch.cuda.is_available():
+            if self.distiller.use_fp16 and not has_fp16_params:
+                print("Mixed precision training enabled - FP16 computations with FP32 parameters and gradient scaling")
+            elif has_fp16_params:
+                print("FP16 model parameters detected - using FP16 training without gradient scaling")
+            else:
+                print("FP32 training - gradient scaler disabled")
+        else:
+            print("CUDA not available - gradient scaler disabled")
 
         # Initial evaluation
         if step % self.args.eval_steps == 0:
