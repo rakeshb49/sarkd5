@@ -140,10 +140,15 @@ class StableEvaluator:
                             batch_loss = masked_losses.sum() / valid_mask.sum()
 
                             # Clamp loss to prevent numerical issues
-                            batch_loss = torch.clamp(batch_loss, 0, 20)
+                            batch_loss = torch.clamp(batch_loss, 0, 15)
 
                             if torch.isnan(batch_loss) or torch.isinf(batch_loss):
+                                print(f"    Warning: NaN/Inf loss in eval batch {batch_idx}, skipping")
                                 continue
+
+                            # Additional check for extreme values
+                            if batch_loss.item() > 12:
+                                print(f"    Warning: High eval loss {batch_loss.item():.4f} in batch {batch_idx}")
 
                             total_loss += batch_loss.item()
                             total_tokens += valid_mask.sum().item()
@@ -155,15 +160,31 @@ class StableEvaluator:
 
         except Exception as e:
             print(f"Evaluation error: {e}")
+            import traceback
+            print(f"Evaluation traceback: {traceback.format_exc()}")
             return float('inf')
         finally:
             student_model.train()
 
         if batch_count == 0:
+            print(f"  Warning: No valid evaluation batches processed")
             return float('inf')
 
         avg_loss = total_loss / batch_count
-        perplexity = math.exp(min(avg_loss, 20))
+        print(f"  Debug: avg_loss={avg_loss:.4f}, batch_count={batch_count}, total_tokens={total_tokens}")
+
+        # Prevent overflow in exp calculation
+        if avg_loss > 15:
+            print(f"  Warning: Clamping high avg_loss {avg_loss:.4f} to 15")
+            avg_loss = 15
+
+        perplexity = math.exp(avg_loss)
+
+        # Final sanity check
+        if math.isnan(perplexity) or math.isinf(perplexity):
+            print(f"  Error: Invalid perplexity calculated from avg_loss={avg_loss}")
+            return float('inf')
+
         return perplexity
 
 
@@ -260,12 +281,20 @@ class StableTrainer:
 
             # Check for numerical issues
             if torch.isnan(total_loss) or torch.isinf(total_loss):
+                print(f"  Numerical issue: total_loss={total_loss}, kd={kd.item():.4f}, ce={ce.item():.4f}")
                 return None, None, None
+
+            # Additional check for extreme values
+            if total_loss.item() > 20:
+                print(f"  Warning: Very high loss {total_loss.item():.4f}, clamping to 15")
+                total_loss = torch.clamp(total_loss, 0, 15)
 
             return total_loss, kd.item(), ce.item(), tokens
 
         except Exception as e:
             print(f"Forward pass error: {e}")
+            import traceback
+            print(f"Traceback: {traceback.format_exc()}")
             return None, None, None
 
     def train(self, train_loader, save_callback=None, log_callback=None):
@@ -402,7 +431,8 @@ class StableTrainer:
         print("🏁 Running final evaluation...")
         final_ppl = self.run_evaluation(step, log_callback)
         print(f"Final validation perplexity: {final_ppl:.2f}")
-        print(f"Best validation perplexity: {self.best_val_ppl:.2f} at step {self.best_step}")
+        best_ppl_display = self.best_val_ppl if self.best_val_ppl != float('inf') else final_ppl
+        print(f"Best validation perplexity: {best_ppl_display:.2f} at step {self.best_step}")
 
         return self.training_history
 
@@ -418,6 +448,8 @@ class StableTrainer:
             # Track best model
             is_best = val_ppl < self.best_val_ppl
             if is_best:
+                self.best_val_ppl = val_ppl
+                self.best_step = step
                 print(f"  🏆 New best model! PPL: {val_ppl:.2f}")
 
             # Log results
@@ -426,7 +458,7 @@ class StableTrainer:
                     "step": step,
                     "val_loss": val_loss,
                     "val_ppl": val_ppl,
-                    "best_val_ppl": self.best_val_ppl,
+                    "best_val_ppl": self.best_val_ppl if self.best_val_ppl != float('inf') else val_ppl,
                     "best_step": self.best_step,
                     "is_best": is_best
                 })
@@ -633,7 +665,8 @@ def main():
             json.dump(training_history, f, indent=2)
 
         print(f"\n✅ Training completed successfully!")
-        print(f"📊 Best validation perplexity: {trainer.best_val_ppl:.2f} at step {trainer.best_step}")
+        best_ppl_final = trainer.best_val_ppl if trainer.best_val_ppl != float('inf') else 0.0
+        print(f"📊 Best validation perplexity: {best_ppl_final:.2f} at step {trainer.best_step}")
 
     except Exception as e:
         print(f"\n❌ Training failed: {e}")
