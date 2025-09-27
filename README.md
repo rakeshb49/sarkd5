@@ -42,6 +42,132 @@ python train_sar_kd.py \
 
 On Kaggle P100 (16GB), this configuration keeps memory usage moderate by using small batch sizes with gradient accumulation. Increase steps as budget allows.
 
+## Memory Optimization for Constrained Devices
+
+For GPUs with limited memory (8GB or less), use these memory-saving techniques:
+
+### FP16 Mixed Precision Training
+Use `--model_dtype float16` to reduce memory usage by ~50%:
+
+```bash
+python train_sar_kd.py \
+  --teacher_model huihui-ai/Huihui-MoE-1B-A0.6B \
+  --student_model HuggingFaceTB/SmolLM-135M \
+  --model_dtype float16 \
+  --per_device_batch_size 1 \
+  --grad_accum_steps 16 \
+  --block_size 512 \
+  --train_steps 1000 \
+  --output_dir outputs/sar_kd_fp16
+```
+
+### Additional Memory Saving Options
+- **Smaller batch size**: Use `--per_device_batch_size 1` with higher `--grad_accum_steps`
+- **Shorter sequences**: Reduce `--block_size` from 1024 to 512 or 256
+- **Gradient checkpointing**: Automatically enabled for supported models
+- **Higher gradient accumulation**: Use `--grad_accum_steps 16` or higher to maintain effective batch size
+
+### Memory Usage Estimates
+- **FP32 (default)**: ~14-16GB for teacher + student + gradients
+- **FP16**: ~8-10GB for teacher + student + gradients
+- **FP16 + optimizations**: ~6-8GB total memory usage
+
+### Example for 8GB GPU (RTX 2070, GTX 1080):
+```bash
+python train_sar_kd.py \
+  --model_dtype float16 \
+  --per_device_batch_size 1 \
+  --grad_accum_steps 16 \
+  --block_size 512 \
+  --train_steps 1000
+```
+
+### Memory Estimation Tool
+To estimate memory usage before training:
+
+```bash
+python -c "
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+def estimate_memory(model_name, dtype_str='float32'):
+    dtype = torch.float16 if dtype_str == 'float16' else torch.float32
+    print(f'Estimating memory for {model_name} with {dtype_str}...')
+    
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name, torch_dtype=dtype, device_map='cpu'
+        )
+        param_count = sum(p.numel() for p in model.parameters())
+        bytes_per_param = 2 if dtype == torch.float16 else 4
+        model_size_gb = (param_count * bytes_per_param) / (1024**3)
+        
+        # Rough estimates including gradients, optimizer states, activations
+        training_multiplier = 4 if dtype == torch.float32 else 2.5
+        total_estimate = model_size_gb * training_multiplier
+        
+        print(f'  Parameters: {param_count:,}')
+        print(f'  Model size: {model_size_gb:.2f} GB')
+        print(f'  Training estimate: {total_estimate:.2f} GB')
+        return total_estimate
+    except Exception as e:
+        print(f'  Error: {e}')
+        return None
+
+# Estimate both models
+teacher_mem = estimate_memory('huihui-ai/Huihui-MoE-1B-A0.6B', 'float16')
+student_mem = estimate_memory('HuggingFaceTB/SmolLM-135M', 'float16')
+
+if teacher_mem and student_mem:
+    total = teacher_mem + student_mem
+    print(f'Total estimated memory: {total:.2f} GB')
+    if total > 8:
+        print('Recommendation: Use additional optimizations for 8GB GPUs')
+    elif total > 16:
+        print('Recommendation: Use 24GB+ GPU or reduce model sizes')
+"
+```
+
+### Quick Start Commands by GPU Memory
+
+**For 6-8GB GPUs (RTX 3060, GTX 1060):**
+```bash
+python train_sar_kd.py \
+  --model_dtype float16 \
+  --per_device_batch_size 1 \
+  --grad_accum_steps 32 \
+  --block_size 256 \
+  --train_steps 500
+```
+
+**For 10-12GB GPUs (RTX 3080, RTX 2080 Ti):**
+```bash
+python train_sar_kd.py \
+  --model_dtype float16 \
+  --per_device_batch_size 1 \
+  --grad_accum_steps 16 \
+  --block_size 512 \
+  --train_steps 1000
+```
+
+**For 16GB+ GPUs (RTX 4090, V100):**
+```bash
+python train_sar_kd.py \
+  --model_dtype float16 \
+  --per_device_batch_size 2 \
+  --grad_accum_steps 8 \
+  --block_size 1024 \
+  --train_steps 1000 \
+  --use_scheduler --warmup_steps 100
+```
+
+### Advanced Memory Saving Tips
+- **Gradient accumulation**: Use higher `--grad_accum_steps` to reduce per-step memory
+- **Sequence length**: Start with `--block_size 256`, increase gradually
+- **Batch size**: Keep `--per_device_batch_size 1` for maximum memory savings
+- **Router-only training**: Only router parameters are trained, reducing optimizer memory
+- **Automatic mixed precision**: FP16 computations with FP32 master weights
+
 Outputs:
 - Student model: saved to `--output_dir/student/`
 - Router update (teacher side): `--output_dir/router_update.pt` (contains only router parameters); original teacher weights remain unchanged.
@@ -60,6 +186,8 @@ Additional options:
 --warmup_steps 100                # Number of warmup steps
 --scheduler_type cosine           # Scheduler type: linear or cosine
 --router_patterns gate router     # Custom regex patterns for router discovery
+--model_dtype float16             # Use FP16 for memory efficiency
+--save_steps 500                  # Save model every N steps
 ```
 
 Caveats:

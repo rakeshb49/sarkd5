@@ -26,6 +26,7 @@ def parse_args():
     p.add_argument('--grad_accum_steps', type=int, default=8)
     p.add_argument('--train_steps', type=int, default=1000)
     p.add_argument('--eval_steps', type=int, default=200)
+    p.add_argument('--save_steps', type=int, default=0, help='Save model every N steps (0 to disable)')
     p.add_argument('--student_lr', type=float, default=1e-4)
     p.add_argument('--router_lr', type=float, default=5e-4)
     p.add_argument('--temperature', type=float, default=2.0)
@@ -146,6 +147,7 @@ def main():
         steps=args.train_steps,
         grad_accum_steps=args.grad_accum_steps,
         eval_every=args.eval_steps,
+        save_every=args.save_steps,
         save_callback=save_callback,
         log_callback=log_callback,
     )

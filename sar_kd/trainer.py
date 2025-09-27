@@ -101,6 +101,7 @@ class SARDistiller:
         steps: int,
         grad_accum_steps: int = 1,
         eval_every: int = 0,
+        save_every: int = 0,
         save_callback=None,
         log_callback=None,
     ):
@@ -308,12 +309,18 @@ class SARDistiller:
                         "tokens": total_tokens,
                     })
 
-                if eval_every and eval_loader is not None and step % eval_every == 0:
+                # Handle evaluation and saving logic
+                should_eval = eval_every and eval_loader is not None and step % eval_every == 0
+                should_save = save_every and step % save_every == 0
+
+                if should_eval:
                     ppl = self.evaluate(eval_loader)
                     if log_callback:
                         log_callback({"step": step, "val_ppl": ppl})
-                    if save_callback:
-                        save_callback(step, self.student, self.router_linears)
+
+                # Save model if needed (either for eval or save interval, but avoid duplicates)
+                if save_callback and (should_eval or should_save):
+                    save_callback(step, self.student, self.router_linears)
 
         if save_callback:
             save_callback(step, self.student, self.router_linears)
