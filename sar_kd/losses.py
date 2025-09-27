@@ -25,10 +25,10 @@ def router_anchor_l2(current: Dict[str, torch.Tensor], initial: Dict[str, torch.
     return loss
 
 
-def router_load_balance_loss(gate_probs_by_layer: Dict[str, torch.Tensor]) -> torch.Tensor:
+def router_load_balance_loss(gate_probs_by_layer: Dict[str, torch.Tensor], device: torch.device = None) -> torch.Tensor:
     # Switch Transformers style: encourage mean usage per expert to be uniform
     if not gate_probs_by_layer:
-        return torch.tensor(0.0)
+        return torch.tensor(0.0, device=device if device is not None else 'cpu')
     loss = None
     for name, probs in gate_probs_by_layer.items():
         # probs: [tokens, n_experts]
@@ -39,13 +39,20 @@ def router_load_balance_loss(gate_probs_by_layer: Dict[str, torch.Tensor]) -> to
         l = (n_exp * (mean_usage.pow(2).sum()))
         loss = l if loss is None else (loss + l)
     if loss is None:
-        loss = torch.tensor(0.0, device=list(gate_probs_by_layer.values())[0].device)
+        # If we had layers but no valid probabilities, use the provided device or infer from tensors
+        if device is not None:
+            loss_device = device
+        elif gate_probs_by_layer:
+            loss_device = list(gate_probs_by_layer.values())[0].device
+        else:
+            loss_device = 'cpu'
+        loss = torch.tensor(0.0, device=loss_device)
     return loss
 
 
-def router_entropy_bonus(gate_probs_by_layer: Dict[str, torch.Tensor]) -> torch.Tensor:
+def router_entropy_bonus(gate_probs_by_layer: Dict[str, torch.Tensor], device: torch.device = None) -> torch.Tensor:
     if not gate_probs_by_layer:
-        return torch.tensor(0.0)
+        return torch.tensor(0.0, device=device if device is not None else 'cpu')
     loss = None
     for _, probs in gate_probs_by_layer.items():
         # encourage higher entropy => subtract entropy => loss = -H
@@ -54,5 +61,12 @@ def router_entropy_bonus(gate_probs_by_layer: Dict[str, torch.Tensor]) -> torch.
         l = -H
         loss = l if loss is None else (loss + l)
     if loss is None:
-        loss = torch.tensor(0.0, device=list(gate_probs_by_layer.values())[0].device)
+        # If we had layers but no valid probabilities, use the provided device or infer from tensors
+        if device is not None:
+            loss_device = device
+        elif gate_probs_by_layer:
+            loss_device = list(gate_probs_by_layer.values())[0].device
+        else:
+            loss_device = 'cpu'
+        loss = torch.tensor(0.0, device=loss_device)
     return loss

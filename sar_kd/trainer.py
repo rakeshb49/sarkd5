@@ -30,6 +30,10 @@ class SARConfig:
     router_lr: float = 5e-4
     weight_decay: float = 0.0
     max_grad_norm: float = 1.0
+    use_scheduler: bool = False
+    warmup_steps: int = 100
+    scheduler_type: str = 'cosine'
+    total_steps: int = 1000
 
 
 class SARDistiller:
@@ -40,6 +44,7 @@ class SARDistiller:
         device: torch.device,
         config: SARConfig,
         tokenizers_compatible: bool = True,
+        router_patterns: Optional[List[str]] = None,
     ):
         self.teacher = teacher
         self.student = student
@@ -47,9 +52,7 @@ class SARDistiller:
         self.config = config
         self.same_tok = tokenizers_compatible
 
-        self.router_linears = collect_router_linears(self.teacher)
-        if len(self.router_linears) == 0:
-            print("[WARN] No router-like linear layers found. Proceeding without router training.")
+        self.router_linears = collect_router_linears(self.teacher, custom_patterns=router_patterns, verbose=True)
         self.router_params = freeze_all_but_router(self.teacher, self.router_linears)
         self.router_init = snapshot_router_state(self.router_linears)
 
@@ -73,6 +76,24 @@ class SARDistiller:
             param_groups.append({"params": self.h_proj.parameters(), "lr": config.student_lr, "weight_decay": 0.0})
         self.optimizer = torch.optim.AdamW(param_groups)
 
+        # Initialize learning rate scheduler if requested
+        self.scheduler = None
+        if config.use_scheduler:
+            from transformers.optimization import get_linear_schedule_with_warmup, get_cosine_schedule_with_warmup
+            if config.scheduler_type == 'linear':
+                self.scheduler = get_linear_schedule_with_warmup(
+                    self.optimizer,
+                    num_warmup_steps=config.warmup_steps,
+                    num_training_steps=config.total_steps
+                )
+            elif config.scheduler_type == 'cosine':
+                self.scheduler = get_cosine_schedule_with_warmup(
+                    self.optimizer,
+                    num_warmup_steps=config.warmup_steps,
+                    num_training_steps=config.total_steps
+                )
+            print(f"Using {config.scheduler_type} learning rate scheduler with {config.warmup_steps} warmup steps")
+
     def train(
         self,
         train_loader: DataLoader,
@@ -83,23 +104,21 @@ class SARDistiller:
         save_callback=None,
         log_callback=None,
     ):
-        self.teacher.train()  # only router params are trainable
+        self.teacher.eval()  # disable dropout but router params still trainable via requires_grad=True
         self.student.train()
 
         step = 0
         total_tokens = 0
         running_loss = 0.0
-        # Disable scaler for FP16 models to avoid gradient scaling issues
-        use_scaler = torch.cuda.is_available() and not any(
-            p.dtype == torch.float16 for p in list(self.student.parameters()) + list(self.router_params)
-        )
+        # Enable scaler for mixed precision training, especially important with FP16 parameters
+        use_scaler = torch.cuda.is_available()
         scaler = torch.amp.GradScaler('cuda', enabled=use_scaler)
 
         # Print scaler status for user information
         if torch.cuda.is_available():
             has_fp16_params = any(p.dtype == torch.float16 for p in list(self.student.parameters()) + list(self.router_params))
             if has_fp16_params:
-                print("FP16 models detected - gradient scaler disabled to avoid scaling errors")
+                print("FP16 models detected - gradient scaler enabled to prevent gradient underflow")
             else:
                 print("FP32 models detected - gradient scaler enabled for mixed precision training")
         else:
@@ -143,36 +162,61 @@ class SARDistiller:
                         t_off = batch['teacher_offsets'].to(self.device)
                         s_off = batch['student_offsets'].to(self.device)
 
-                        mse_terms = []
-                        count = 0
+                        # Vectorized hidden-state alignment
+                        mse_loss = torch.tensor(0.0, device=self.device)
+                        total_alignments = 0
+
                         B = s_h.size(0)
                         for b in range(B):
-                            ti = t_h_proj[b]
-                            si = s_h[b]
-                            to = t_off[b]
-                            so = s_off[b]
-                            # determine valid student positions
-                            valid_s = (so[:, 0] >= 0) & (so[:, 1] >= 0)
-                            for i in torch.nonzero(valid_s, as_tuple=False).flatten().tolist():
-                                s_start, s_end = so[i].tolist()
-                                if s_end <= s_start:
+                            ti = t_h_proj[b]  # [Lt, H]
+                            si = s_h[b]      # [Ls, H]
+                            to = t_off[b]    # [Lt, 2]
+                            so = s_off[b]    # [Ls, 2]
+
+                            # Get valid positions
+                            valid_s = (so[:, 0] >= 0) & (so[:, 1] >= 0)  # [Ls]
+                            valid_t = (to[:, 0] >= 0) & (to[:, 1] >= 0)  # [Lt]
+
+                            if not valid_s.any() or not valid_t.any():
+                                continue
+
+                            # Filter valid offsets and hidden states
+                            s_valid_idx = torch.nonzero(valid_s, as_tuple=False).flatten()
+                            t_valid_idx = torch.nonzero(valid_t, as_tuple=False).flatten()
+
+                            so_valid = so[s_valid_idx]  # [n_valid_s, 2]
+                            to_valid = to[t_valid_idx]  # [n_valid_t, 2]
+                            si_valid = si[s_valid_idx]  # [n_valid_s, H]
+                            ti_valid = ti[t_valid_idx]  # [n_valid_t, H]
+
+                            # Vectorized overlap computation
+                            # so_valid[:, 0:1] -> [n_valid_s, 1], to_valid[:, 1:2].T -> [1, n_valid_t]
+                            # Broadcast to [n_valid_s, n_valid_t]
+                            s_starts = so_valid[:, 0:1]  # [n_valid_s, 1]
+                            s_ends = so_valid[:, 1:2]    # [n_valid_s, 1]
+                            t_starts = to_valid[:, 0:1].T  # [1, n_valid_t]
+                            t_ends = to_valid[:, 1:2].T    # [1, n_valid_t]
+
+                            # Check for overlaps: intervals [s_start, s_end) and [t_start, t_end) overlap
+                            # if not (t_end <= s_start or t_start >= s_end)
+                            # which is equivalent to (t_end > s_start) and (t_start < s_end)
+                            overlaps = (t_ends > s_starts) & (t_starts < s_ends)  # [n_valid_s, n_valid_t]
+
+                            # For each student position, find overlapping teacher positions
+                            for s_idx in range(overlaps.size(0)):
+                                overlap_mask = overlaps[s_idx]  # [n_valid_t]
+                                if not overlap_mask.any():
                                     continue
-                                # find teacher positions that overlap
-                                t_valid = (to[:, 0] >= 0) & (to[:, 1] >= 0)
-                                t_sel = []
-                                for j in torch.nonzero(t_valid, as_tuple=False).flatten().tolist():
-                                    t_start, t_end = to[j].tolist()
-                                    if t_end <= t_start:
-                                        continue
-                                    # overlap if intervals intersect
-                                    if not (t_end <= s_start or t_start >= s_end):
-                                        t_sel.append(j)
-                                if not t_sel:
-                                    continue
-                                t_mean = ti[t_sel].mean(dim=0)
-                                mse_terms.append((si[i] - t_mean).pow(2).mean())
-                                count += 1
-                        kd = torch.stack(mse_terms).mean() if mse_terms else torch.tensor(0.0, device=self.device)
+
+                                # Average teacher hidden states that overlap with this student position
+                                t_overlapping = ti_valid[overlap_mask]  # [n_overlap, H]
+                                t_mean = t_overlapping.mean(dim=0)      # [H]
+
+                                # MSE loss
+                                mse_loss += (si_valid[s_idx] - t_mean).pow(2).mean()
+                                total_alignments += 1
+
+                        kd = mse_loss / max(1, total_alignments) if total_alignments > 0 else torch.tensor(0.0, device=self.device)
                         if torch.isnan(kd):
                             kd = torch.tensor(0.0, device=self.device)
 
@@ -206,8 +250,8 @@ class SARDistiller:
                     anchor = router_anchor_l2(current_router_state, self.router_init) * self.config.router_anchor_weight
 
                     gate_probs = self.gating_stats.pop_and_reset()
-                    lb = router_load_balance_loss(gate_probs) * self.config.router_load_balance_weight
-                    ent = router_entropy_bonus(gate_probs) * self.config.router_entropy_weight
+                    lb = router_load_balance_loss(gate_probs, self.device) * self.config.router_load_balance_weight
+                    ent = router_entropy_bonus(gate_probs, self.device) * self.config.router_entropy_weight
 
                     loss = self.config.alpha_kd * kd + self.config.alpha_ce * ce + anchor + lb + ent
                     if torch.isnan(loss) or torch.isinf(loss):
@@ -222,25 +266,39 @@ class SARDistiller:
                 if (step + 1) % grad_accum_steps == 0:
                     if did_backward:
                         if scaler.is_enabled():
-                            # Standard AMP workflow (scaler disabled for FP16 models)
+                            # Standard AMP workflow with gradient scaling
                             scaler.unscale_(self.optimizer)
                             torch.nn.utils.clip_grad_norm_(self.student.parameters(), self.config.max_grad_norm)
                             torch.nn.utils.clip_grad_norm_(self.router_params, self.config.max_grad_norm)
                             scaler.step(self.optimizer)
                             scaler.update()
                         else:
-                            # Manual step without scaler (for FP16 models or CPU)
+                            # Manual step without scaler (CPU only)
                             torch.nn.utils.clip_grad_norm_(self.student.parameters(), self.config.max_grad_norm)
                             torch.nn.utils.clip_grad_norm_(self.router_params, self.config.max_grad_norm)
                             self.optimizer.step()
                     # Always zero grads at accumulation boundary
                     self.optimizer.zero_grad(set_to_none=True)
 
+                    # Step learning rate scheduler if enabled
+                    if self.scheduler is not None:
+                        self.scheduler.step()
+
                 running_loss += loss.item() * grad_accum_steps
+                # Count tokens that actually contribute to the loss for accurate throughput
                 if 'teacher_input_ids' in batch:
-                    total_tokens += int((s_mask.sum()).item())
+                    # For dual tokenizer mode, count valid student labels
+                    s_labels = batch.get('student_labels')
+                    if s_labels is not None:
+                        total_tokens += int((s_labels != -100).sum().item())
+                    else:
+                        total_tokens += int((s_mask.sum()).item())
                 else:
-                    total_tokens += int((attention_mask.sum() if attention_mask is not None else input_ids.numel()).item())
+                    # For same tokenizer mode, count valid labels
+                    if labels is not None:
+                        total_tokens += int((labels != -100).sum().item())
+                    else:
+                        total_tokens += int((attention_mask.sum() if attention_mask is not None else input_ids.numel()).item())
 
                 step += 1
                 if log_callback and step % max(1, grad_accum_steps) == 0:

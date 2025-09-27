@@ -13,7 +13,7 @@ Key features:
 
 Tokenizer compatibility:
 - If tokenizers are compatible (same class, vocab size, identical behavior on probes), the distiller performs logit-level KD (KL with temperature) and trains the teacher router.
-- If tokenizers differ, it falls back to a tokenization-agnostic path: it aligns teacher and student hidden states by character-span overlaps using offset mappings from fast tokenizers, and optimizes an MSE between the student hidden states and a projection of teacher hidden states. This preserves differentiability into the teacher’s router. CE on the student labels is still applied.
+- If tokenizers differ, the system automatically uses a sophisticated dual-tokenizer mode: it aligns teacher and student hidden states by character-span overlaps using offset mappings from fast tokenizers, and optimizes an MSE between the student hidden states and a projection of teacher hidden states. This preserves differentiability into the teacher's router. CE on the student labels is still applied.
 
 Run (example on Kaggle P100):
 
@@ -49,6 +49,19 @@ Outputs:
 Evaluation:
 - The script reports student validation perplexity during training.
 
+Advanced features:
+- Learning rate scheduling: Use `--use_scheduler` with `--warmup_steps` and `--scheduler_type` (linear/cosine) for improved convergence
+- Custom router discovery: Use `--router_patterns` to provide custom regex patterns for finding router layers in models with non-standard naming
+- Mixed precision: Automatic support for FP16 models with proper gradient scaling
+
+Additional options:
+```
+--use_scheduler                    # Enable learning rate scheduler
+--warmup_steps 100                # Number of warmup steps
+--scheduler_type cosine           # Scheduler type: linear or cosine
+--router_patterns gate router     # Custom regex patterns for router discovery
+```
+
 Caveats:
-- Some MoE architectures name router layers differently. The router finder here searches common patterns ("gate", "router", "moe"). If your teacher uses unusual naming, the script prints what it found and proceeds; verify that it detected at least one router module.
-- If tokenizers are not compatible, the current implementation stops with an error explaining how to proceed.
+- Some MoE architectures name router layers differently. The router finder searches common patterns ("gate", "router", "moe") and explicitly logs what it found. If no router layers are detected, consider using `--router_patterns` to specify custom patterns.
+- The dual-tokenizer mode automatically handles incompatible tokenizers through hidden-state alignment - no manual intervention required.

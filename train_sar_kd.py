@@ -8,6 +8,7 @@ from datetime import datetime, UTC
 import torch
 from torch.utils.data import DataLoader
 from transformers.data.data_collator import DataCollatorForLanguageModeling
+# Scheduler imports will be done in trainer.py where they're used
 
 from sar_kd.data import build_text_datasets, DualTokenizerCollator
 from sar_kd.models import load_teacher_student
@@ -35,6 +36,10 @@ def parse_args():
     p.add_argument('--router_entropy_weight', type=float, default=1e-4)
     p.add_argument('--weight_decay', type=float, default=0.0)
     p.add_argument('--max_grad_norm', type=float, default=1.0)
+    p.add_argument('--use_scheduler', action='store_true', help='Use learning rate scheduler with warmup and decay')
+    p.add_argument('--warmup_steps', type=int, default=100, help='Number of warmup steps for learning rate scheduler')
+    p.add_argument('--scheduler_type', type=str, default='cosine', choices=['linear', 'cosine'], help='Type of learning rate scheduler')
+    p.add_argument('--router_patterns', nargs='*', help='Custom regex patterns for router discovery')
     p.add_argument('--model_dtype', type=str, default='float32', choices=['float16', 'float32'], help='Model precision: float16 for memory efficiency, float32 for stability')
     p.add_argument('--seed', type=int, default=42)
     p.add_argument('--output_dir', type=str, default='outputs/sar_kd')
@@ -104,9 +109,13 @@ def main():
         router_lr=args.router_lr,
         weight_decay=args.weight_decay,
         max_grad_norm=args.max_grad_norm,
+        use_scheduler=args.use_scheduler,
+        warmup_steps=args.warmup_steps,
+        scheduler_type=args.scheduler_type,
+        total_steps=args.train_steps,
     )
 
-    distiller = SARDistiller(teacher, student, device, cfg, tokenizers_compatible=same_tok)
+    distiller = SARDistiller(teacher, student, device, cfg, tokenizers_compatible=same_tok, router_patterns=args.router_patterns)
 
     def save_callback(step, student_model, router_linears):
         step_dir = os.path.join(args.output_dir)
@@ -117,7 +126,7 @@ def main():
         student_model.save_pretrained(student_dir)
         # save tokenizer compatible with the student
         try:
-            teacher_tok.save_pretrained(student_dir)
+            student_tok.save_pretrained(student_dir)
         except Exception:
             pass
         # save router update only
