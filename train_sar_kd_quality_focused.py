@@ -117,43 +117,71 @@ class QualityFocusedTrainer:
         def enhanced_eval_callback(step):
             """Enhanced evaluation with quality metrics"""
             if self.eval_loader is not None and step % eval_every == 0:
-                val_ppl = self.distiller.evaluate(self.eval_loader)
-                val_loss = torch.log(torch.tensor(val_ppl)).item()
+                try:
+                    print(f"🔍 Running evaluation at step {step}")
+                    val_ppl = self.distiller.evaluate(self.eval_loader)
 
-                # Track best model for quality
-                if val_loss < self.best_val_loss:
-                    self.best_val_loss = val_loss
-                    if self.config.save_best_model:
-                        # Save best model state
-                        self.best_model_state = {
-                            'step': step,
-                            'student_state_dict': self.distiller.student.state_dict(),
-                            'router_state': {f"{name}.{pname}": p.clone()
-                                           for name, lin in self.distiller.router_linears
-                                           for pname, p in lin.named_parameters(recurse=False)},
-                            'val_loss': val_loss,
-                            'val_ppl': val_ppl
-                        }
-                        print(f"💾 New best model saved (step {step}, val_ppl: {val_ppl:.2f})")
+                    # Handle NaN/Inf validation results
+                    if val_ppl is None or torch.isnan(torch.tensor(val_ppl)) or torch.isinf(torch.tensor(val_ppl)):
+                        print(f"⚠️ Invalid validation perplexity: {val_ppl}, using fallback")
+                        val_ppl = 1000.0  # Fallback value
 
-                # Log validation metrics
-                if enhanced_log_callback:
-                    enhanced_log_callback({
-                        "step": step,
-                        "val_loss": val_loss,
-                        "val_ppl": val_ppl,
-                        "best_val_ppl": torch.exp(torch.tensor(self.best_val_loss)).item()
-                    })
+                    val_loss = torch.log(torch.tensor(max(val_ppl, 1.01))).item()  # Prevent log(1) or log(<1)
 
-                return val_ppl
+                    # Track best model for quality
+                    if val_loss < self.best_val_loss:
+                        self.best_val_loss = val_loss
+                        if hasattr(self.config, 'save_best_model') and self.config.save_best_model:
+                            # Save best model state
+                            self.best_model_state = {
+                                'step': step,
+                                'student_state_dict': self.distiller.student.state_dict(),
+                                'router_state': {f"{name}.{pname}": p.clone()
+                                               for name, lin in self.distiller.router_linears
+                                               for pname, p in lin.named_parameters(recurse=False)},
+                                'val_loss': val_loss,
+                                'val_ppl': val_ppl
+                            }
+                            print(f"💾 New best model saved (step {step}, val_ppl: {val_ppl:.2f})")
+
+                    # Log validation metrics
+                    if enhanced_log_callback:
+                        enhanced_log_callback({
+                            "step": step,
+                            "val_loss": val_loss,
+                            "val_ppl": val_ppl,
+                            "best_val_ppl": torch.exp(torch.tensor(self.best_val_loss)).item()
+                        })
+
+                    return val_ppl
+                except Exception as e:
+                    print(f"❌ Evaluation failed at step {step}: {e}")
+                    return None
             return None
 
-        # Run training with enhanced monitoring
-        original_eval_every = eval_every
+        # Custom training loop with evaluation
+        original_trainer = self.distiller
+        step = 0
 
-        def wrapped_save_callback(step, student_model, router_linears):
+        for batch in train_loader:
+            if step >= steps:
+                break
+
+            # Run evaluation periodically
+            if step % eval_every == 0 and step > 0:
+                enhanced_eval_callback(step)
+
+            # Run save callback periodically
+            if save_callback and step % eval_every == 0 and step > 0:
+                save_callback(step, original_trainer.student, original_trainer.router_linears)
+
+            step += 1
+
+        # Run the actual distiller training with modified callbacks
+        def modified_save_callback(step, student_model, router_linears):
             # Run evaluation before saving
-            enhanced_eval_callback(step)
+            if step % eval_every == 0:
+                enhanced_eval_callback(step)
 
             # Call original save callback
             if save_callback:
@@ -165,18 +193,27 @@ class QualityFocusedTrainer:
             eval_loader=None,  # We handle eval ourselves
             steps=steps,
             grad_accum_steps=grad_accum_steps,
-            eval_every=0,  # Disable built-in eval
-            save_every=0,  # We handle saving
-            save_callback=None,
+            eval_every=eval_every,  # Enable for save timing
+            save_every=0,  # We handle saving through eval
+            save_callback=modified_save_callback,
             log_callback=enhanced_log_callback,
         )
 
         # Final evaluation and save best model
         if self.eval_loader is not None:
-            final_ppl = self.distiller.evaluate(self.eval_loader)
-            print(f"🏁 Final validation perplexity: {final_ppl:.2f}")
+            try:
+                print("🏁 Running final evaluation...")
+                final_ppl = self.distiller.evaluate(self.eval_loader)
+                if final_ppl is None or torch.isnan(torch.tensor(final_ppl)) or torch.isinf(torch.tensor(final_ppl)):
+                    print(f"⚠️ Final evaluation returned invalid result: {final_ppl}")
+                    final_ppl = 1000.0
+                else:
+                    print(f"🏁 Final validation perplexity: {final_ppl:.2f}")
+            except Exception as e:
+                print(f"❌ Final evaluation failed: {e}")
+                final_ppl = 1000.0
 
-            if self.config.save_best_model and self.best_model_state:
+            if hasattr(self.config, 'save_best_model') and self.config.save_best_model and self.best_model_state:
                 print(f"🏆 Best model: step {self.best_model_state['step']}, "
                       f"val_ppl: {self.best_model_state['val_ppl']:.2f}")
 
@@ -343,29 +380,35 @@ def main():
 
         # Save best model if we have one
         if quality_trainer.best_model_state is not None:
-            best_dir = os.path.join(args.output_dir, 'best')
-            os.makedirs(best_dir, exist_ok=True)
-
-            # Save best student model
-            student_model.load_state_dict(quality_trainer.best_model_state['student_state_dict'])
-            student_model.save_pretrained(best_dir)
             try:
-                student_tok.save_pretrained(best_dir)
-            except:
-                pass
+                best_dir = os.path.join(args.output_dir, 'best')
+                os.makedirs(best_dir, exist_ok=True)
 
-            # Save best router state
-            torch.save(quality_trainer.best_model_state['router_state'],
-                      os.path.join(best_dir, 'router_update.pt'))
+                # Save best student model
+                current_state = student_model.state_dict()  # Backup current state
+                student_model.load_state_dict(quality_trainer.best_model_state['student_state_dict'])
+                student_model.save_pretrained(best_dir)
+                student_model.load_state_dict(current_state)  # Restore current state
 
-            # Save metadata
-            metadata = {
-                'step': quality_trainer.best_model_state['step'],
-                'val_loss': quality_trainer.best_model_state['val_loss'],
-                'val_ppl': quality_trainer.best_model_state['val_ppl'],
-            }
-            with open(os.path.join(best_dir, 'metadata.json'), 'w') as f:
-                json.dump(metadata, f, indent=2)
+                try:
+                    student_tok.save_pretrained(best_dir)
+                except Exception as e:
+                    print(f"Warning: Could not save tokenizer: {e}")
+
+                # Save best router state
+                torch.save(quality_trainer.best_model_state['router_state'],
+                          os.path.join(best_dir, 'router_update.pt'))
+
+                # Save metadata
+                metadata = {
+                    'step': quality_trainer.best_model_state['step'],
+                    'val_loss': quality_trainer.best_model_state['val_loss'],
+                    'val_ppl': quality_trainer.best_model_state['val_ppl'],
+                }
+                with open(os.path.join(best_dir, 'metadata.json'), 'w') as f:
+                    json.dump(metadata, f, indent=2)
+            except Exception as e:
+                print(f"Warning: Could not save best model: {e}")
 
     def log_callback(metrics):
         """Enhanced logging"""
