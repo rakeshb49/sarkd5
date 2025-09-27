@@ -14,9 +14,12 @@ Designed specifically for P100 FP16 training environments.
 """
 
 import argparse
-import math
-import os
 import json
+import os
+os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
+os.environ.setdefault("TRANSFORMERS_NO_FLAX", "1")
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+import math
 import time
 from typing import Optional, Dict, Any, Tuple, List
 
@@ -31,9 +34,9 @@ from transformers import (
 from datasets import load_dataset
 
 # Import SAR modules
-from sar_distillation import SARDistiller, SARConfig
-from data_utils import build_text_datasets, DualTokenizerCollator
-from model_utils import load_teacher_student
+from sar_kd.trainer import SARDistiller, SARConfig
+from sar_kd.data import build_text_datasets, DualTokenizerCollator
+from sar_kd.models import load_teacher_student
 
 
 def parse_args():

@@ -23,9 +23,9 @@ def run_kaggle_ultra_stable():
     cmd = [
         sys.executable, "/kaggle/working/sarkd5/train_sar_kd_ultra_stable.py",
 
-        # Model configuration - use smaller models for P100
-        "--teacher_model", "microsoft/DialoGPT-medium",  # Smaller teacher for memory
-        "--student_model", "distilgpt2",                 # Small student
+        # Model configuration - same as original command
+        "--teacher_model", "microsoft/DialoGPT-large",   # Same as original
+        "--student_model", "microsoft/DialoGPT-small",   # Same as original
         "--model_dtype", "float16",                      # FP16 for memory efficiency
 
         # Ultra-conservative training settings
