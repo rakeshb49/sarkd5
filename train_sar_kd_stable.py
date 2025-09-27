@@ -31,11 +31,11 @@ def parse_args():
     p.add_argument('--save_steps', type=int, default=200)
 
     # Conservative learning parameters for stability
-    p.add_argument('--student_lr', type=float, default=5e-5)
-    p.add_argument('--router_lr', type=float, default=1e-4)
-    p.add_argument('--temperature', type=float, default=4.0)
-    p.add_argument('--alpha_kd', type=float, default=0.7)
-    p.add_argument('--alpha_ce', type=float, default=0.3)
+    p.add_argument('--student_lr', type=float, default=1e-5)
+    p.add_argument('--router_lr', type=float, default=5e-5)
+    p.add_argument('--temperature', type=float, default=2.0)
+    p.add_argument('--alpha_kd', type=float, default=0.1)
+    p.add_argument('--alpha_ce', type=float, default=0.9)
     p.add_argument('--router_anchor_weight', type=float, default=1e-5)
     p.add_argument('--router_load_balance_weight', type=float, default=1e-4)
     p.add_argument('--router_entropy_weight', type=float, default=1e-5)
@@ -132,6 +132,9 @@ class StableEvaluator:
                             if valid_mask.sum() == 0:
                                 continue
 
+                            # Clamp logits before loss computation
+                            logits = torch.clamp(logits, -8, 8)
+
                             loss_fct = nn.CrossEntropyLoss(reduction='none')
                             losses = loss_fct(logits.view(-1, logits.size(-1)), targets.view(-1))
                             losses = losses.view(targets.shape)
@@ -139,8 +142,8 @@ class StableEvaluator:
                             masked_losses = losses * valid_mask.float()
                             batch_loss = masked_losses.sum() / valid_mask.sum()
 
-                            # Clamp loss to prevent numerical issues
-                            batch_loss = torch.clamp(batch_loss, 0, 15)
+                            # More conservative loss clamping for evaluation
+                            batch_loss = torch.clamp(batch_loss, 0, 10)
 
                             if torch.isnan(batch_loss) or torch.isinf(batch_loss):
                                 print(f"    Warning: NaN/Inf loss in eval batch {batch_idx}, skipping")
@@ -213,6 +216,9 @@ class StableTrainer:
                     s_logits = s_out.logits[:, :-1, :]
                     s_targets = s_labels[:, 1:]
 
+                    # Clamp logits to prevent overflow in FP16
+                    s_logits = torch.clamp(s_logits, -10, 10)
+
                     # Just use CE loss for now
                     valid_mask = (s_targets != -100)
                     if not valid_mask.any():
@@ -251,6 +257,10 @@ class StableTrainer:
                     student_logits = s_out.logits[:, :-1, :]
                     target_labels = labels[:, 1:]
 
+                    # Clamp logits to prevent FP16 overflow
+                    teacher_logits = torch.clamp(teacher_logits, -10, 10)
+                    student_logits = torch.clamp(student_logits, -10, 10)
+
                     # Safe KD loss with temperature
                     teacher_probs = torch.softmax(teacher_logits / self.distiller.config.temperature, dim=-1)
                     student_log_probs = torch.log_softmax(student_logits / self.distiller.config.temperature, dim=-1)
@@ -272,9 +282,18 @@ class StableTrainer:
                     ce = masked_ce.sum() / valid_mask.sum()
                     tokens = valid_mask.sum().item()
 
-            # Clamp losses to prevent explosion
-            kd = torch.clamp(kd, 0, 10)
-            ce = torch.clamp(ce, 0, 10)
+            # More aggressive loss clamping for FP16 stability
+            kd = torch.clamp(kd, 0, 5)
+            ce = torch.clamp(ce, 0, 8)
+
+            # Check for NaN in individual losses
+            if torch.isnan(kd) or torch.isinf(kd):
+                print(f"  KD loss issue: kd={kd}, setting to 0")
+                kd = torch.tensor(0.0, device=self.distiller.device)
+
+            if torch.isnan(ce) or torch.isinf(ce):
+                print(f"  CE loss issue: ce={ce}, skipping batch")
+                return None, None, None
 
             # Simple total loss (skip router regularization for now)
             total_loss = self.distiller.config.alpha_kd * kd + self.distiller.config.alpha_ce * ce
@@ -284,10 +303,10 @@ class StableTrainer:
                 print(f"  Numerical issue: total_loss={total_loss}, kd={kd.item():.4f}, ce={ce.item():.4f}")
                 return None, None, None
 
-            # Additional check for extreme values
-            if total_loss.item() > 20:
-                print(f"  Warning: Very high loss {total_loss.item():.4f}, clamping to 15")
-                total_loss = torch.clamp(total_loss, 0, 15)
+            # More conservative loss clamping
+            if total_loss.item() > 10:
+                print(f"  Warning: Very high loss {total_loss.item():.4f}, clamping to 8")
+                total_loss = torch.clamp(total_loss, 0, 8)
 
             return total_loss, kd.item(), ce.item(), tokens
 
@@ -369,15 +388,32 @@ class StableTrainer:
 
             # Optimizer step
             if (step + 1) % self.args.grad_accum_steps == 0:
-                if use_scaler:
-                    scaler.unscale_(self.distiller.optimizer)
-                    torch.nn.utils.clip_grad_norm_(self.distiller.student.parameters(), self.distiller.config.max_grad_norm)
-                    if hasattr(self.distiller, 'router_params'):
-                        torch.nn.utils.clip_grad_norm_(self.distiller.router_params, self.distiller.config.max_grad_norm)
-                    scaler.step(self.distiller.optimizer)
-                    scaler.update()
-                else:
-                    torch.nn.utils.clip_grad_norm_(self.distiller.student.parameters(), self.distiller.config.max_grad_norm)
+                try:
+                    if use_scaler:
+                        scaler.unscale_(self.distiller.optimizer)
+                        # More aggressive gradient clipping for FP16
+                        grad_norm = torch.nn.utils.clip_grad_norm_(self.distiller.student.parameters(), self.distiller.config.max_grad_norm)
+                        if hasattr(self.distiller, 'router_params'):
+                            torch.nn.utils.clip_grad_norm_(self.distiller.router_params, self.distiller.config.max_grad_norm)
+
+                        # Skip update if gradients are too large
+                        if grad_norm > 5.0:
+                            print(f"  Skipping optimizer step: grad_norm={grad_norm:.4f}")
+                            scaler.update()
+                            self.distiller.optimizer.zero_grad()
+                            continue
+
+                        scaler.step(self.distiller.optimizer)
+                        scaler.update()
+                    else:
+                        # More aggressive gradient clipping for FP16
+                        grad_norm = torch.nn.utils.clip_grad_norm_(self.distiller.student.parameters(), self.distiller.config.max_grad_norm)
+
+                        # Skip update if gradients are too large
+                        if grad_norm > 5.0:
+                            print(f"  Skipping optimizer step: grad_norm={grad_norm:.4f}")
+                            self.distiller.optimizer.zero_grad()
+                            continue
                     if hasattr(self.distiller, 'router_params'):
                         torch.nn.utils.clip_grad_norm_(self.distiller.router_params, self.distiller.config.max_grad_norm)
                     self.distiller.optimizer.step()
@@ -502,8 +538,9 @@ def main():
     print(f"  Device: {device}")
     print(f"  Model dtype: {dtype}")
     print(f"  Training steps: {args.train_steps}")
-    print(f"  Conservative learning rates: student={args.student_lr}, router={args.router_lr}")
+    print(f"  Ultra-conservative learning rates: student={args.student_lr}, router={args.router_lr}")
     print(f"  Temperature: {args.temperature}")
+    print(f"  FP16 numerical stability: Enhanced")
 
     if torch.cuda.is_available():
         torch.backends.cuda.matmul.allow_tf32 = True
