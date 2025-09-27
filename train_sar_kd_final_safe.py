@@ -55,10 +55,10 @@ def parse_args():
     parser.add_argument("--clear_cache_every_step", action="store_true")
 
     # Conservative learning rates for stability
-    parser.add_argument("--student_lr", type=float, default=5e-6)
+    parser.add_argument("--student_lr", type=float, default=1e-6)
     parser.add_argument("--router_lr", type=float, default=2e-5)
     parser.add_argument("--weight_decay", type=float, default=0.01)
-    parser.add_argument("--max_grad_norm", type=float, default=0.5)
+    parser.add_argument("--max_grad_norm", type=float, default=15.0)
 
     # Knowledge distillation - stable settings
     parser.add_argument("--temperature", type=float, default=2.0)
