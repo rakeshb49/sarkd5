@@ -115,12 +115,21 @@ class SARDistiller:
         running_loss = 0.0
         # Enable scaler for mixed precision training
         use_scaler = torch.cuda.is_available() and self.use_fp16
+
+        # Additional safety check: disable scaler if any parameters are FP16
+        has_fp16_params = any(p.dtype == torch.float16 for p in list(self.student.parameters()) + list(self.router_params))
+        if has_fp16_params and use_scaler:
+            print("WARNING: FP16 parameters detected - disabling gradient scaler to prevent errors")
+            use_scaler = False
+
         scaler = torch.amp.GradScaler('cuda', enabled=use_scaler)
 
         # Print scaler status for user information
         if torch.cuda.is_available():
-            if self.use_fp16:
+            if self.use_fp16 and not has_fp16_params:
                 print("Mixed precision training enabled - FP16 computations with FP32 parameters and gradient scaling")
+            elif has_fp16_params:
+                print("FP16 model parameters detected - using FP16 training without gradient scaling")
             else:
                 print("FP32 training - gradient scaler disabled")
         else:
