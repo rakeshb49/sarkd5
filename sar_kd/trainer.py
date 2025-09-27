@@ -35,6 +35,8 @@ class SARConfig:
     scheduler_type: str = 'cosine'
     total_steps: int = 1000
     use_fp16: bool = False
+    offload_teacher_to_cpu: bool = True  # Move teacher to CPU when not in use
+    clear_cache_every_step: bool = True  # Clear GPU cache regularly
 
 
 class SARDistiller:
@@ -53,6 +55,7 @@ class SARDistiller:
         self.config = config
         self.same_tok = tokenizers_compatible
         self.use_fp16 = config.use_fp16
+        self.teacher_device = device  # Track where teacher is currently located
 
         self.router_linears = collect_router_linears(self.teacher, custom_patterns=router_patterns, verbose=True)
         self.router_params = freeze_all_but_router(self.teacher, self.router_linears)
@@ -96,6 +99,13 @@ class SARDistiller:
                 )
             print(f"Using {config.scheduler_type} learning rate scheduler with {config.warmup_steps} warmup steps")
 
+        # Memory optimization: move teacher to CPU if enabled
+        if config.offload_teacher_to_cpu and torch.cuda.is_available():
+            print("Moving teacher model to CPU for memory optimization")
+            self.teacher.cpu()
+            self.teacher_device = torch.device('cpu')
+            torch.cuda.empty_cache()
+
     def train(
         self,
         train_loader: DataLoader,
@@ -109,6 +119,14 @@ class SARDistiller:
     ):
         self.teacher.eval()  # disable dropout but router params still trainable via requires_grad=True
         self.student.train()
+
+        def move_teacher_to_device(target_device):
+            """Helper to move teacher model between devices"""
+            if self.teacher_device != target_device:
+                self.teacher.to(target_device)
+                self.teacher_device = target_device
+                if target_device.type == 'cpu':
+                    torch.cuda.empty_cache()
 
         step = 0
         total_tokens = 0
@@ -153,6 +171,11 @@ class SARDistiller:
 
                 # Use autocast only when CUDA is available and FP16 is requested
                 autocast_enabled = torch.cuda.is_available() and self.use_fp16
+
+                # Move teacher to GPU before forward pass if CPU offloading is enabled
+                if self.config.offload_teacher_to_cpu:
+                    move_teacher_to_device(self.device)
+
                 with torch.amp.autocast('cuda', enabled=autocast_enabled):
                     if 'teacher_input_ids' in batch:
                         # dual path
@@ -270,6 +293,10 @@ class SARDistiller:
                     if torch.isnan(loss) or torch.isinf(loss):
                         loss = torch.tensor(0.0, device=self.device)
 
+                # Move teacher back to CPU after forward pass to save memory
+                if self.config.offload_teacher_to_cpu:
+                    move_teacher_to_device(torch.device('cpu'))
+
                 loss = loss / grad_accum_steps
                 did_backward = False
                 if loss.requires_grad:
@@ -299,6 +326,10 @@ class SARDistiller:
                     # Step learning rate scheduler if enabled
                     if self.scheduler is not None:
                         self.scheduler.step()
+
+                    # Clear GPU cache periodically to prevent fragmentation
+                    if self.config.clear_cache_every_step and torch.cuda.is_available():
+                        torch.cuda.empty_cache()
 
                 running_loss += loss.item() * grad_accum_steps
                 # Count tokens that actually contribute to the loss for accurate throughput

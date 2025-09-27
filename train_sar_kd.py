@@ -42,6 +42,8 @@ def parse_args():
     p.add_argument('--scheduler_type', type=str, default='cosine', choices=['linear', 'cosine'], help='Type of learning rate scheduler')
     p.add_argument('--router_patterns', nargs='*', help='Custom regex patterns for router discovery')
     p.add_argument('--model_dtype', type=str, default='float32', choices=['float16', 'float32'], help='Model precision: float16 for memory efficiency, float32 for stability')
+    p.add_argument('--offload_teacher_to_cpu', action='store_true', help='Move teacher model to CPU when not in use to save GPU memory')
+    p.add_argument('--clear_cache_every_step', action='store_true', default=True, help='Clear GPU cache after each gradient update to prevent fragmentation')
     p.add_argument('--seed', type=int, default=42)
     p.add_argument('--output_dir', type=str, default='outputs/sar_kd')
     return p.parse_args()
@@ -56,10 +58,10 @@ def main():
     torch.cuda.manual_seed_all(args.seed)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    # For mixed precision, keep model parameters in FP32 and use autocast for FP16 computations
-    dtype = torch.float32  # Always use FP32 for model parameters
+    # Determine model precision strategy
     use_fp16 = args.model_dtype == 'float16'
-    print(f"Using mixed precision training: {use_fp16} (model params: FP32, computations: {'FP16' if use_fp16 else 'FP32'})")
+    dtype = torch.float16 if use_fp16 else torch.float32
+    print(f"Model precision: {dtype}, Mixed precision training: {use_fp16}")
     # Enable TF32 when on CUDA and better matmul precision on CPU
     try:
         if torch.cuda.is_available():
@@ -71,7 +73,7 @@ def main():
         pass
 
     teacher, student, teacher_tok, student_tok = load_teacher_student(
-        args.teacher_model, args.student_model, dtype, device
+        args.teacher_model, args.student_model, dtype, device, use_fp16=use_fp16
     )
 
     train_ds, eval_ds, same_tok = build_text_datasets(
@@ -117,6 +119,8 @@ def main():
         scheduler_type=args.scheduler_type,
         total_steps=args.train_steps,
         use_fp16=use_fp16,
+        offload_teacher_to_cpu=args.offload_teacher_to_cpu,
+        clear_cache_every_step=args.clear_cache_every_step,
     )
 
     distiller = SARDistiller(teacher, student, device, cfg, tokenizers_compatible=same_tok, router_patterns=args.router_patterns)
@@ -142,6 +146,12 @@ def main():
 
     def log_callback(metrics: dict):
         ts = datetime.now(UTC).isoformat()
+        # Add GPU memory usage to logs
+        if torch.cuda.is_available():
+            metrics.update({
+                "gpu_mem_allocated_gb": torch.cuda.memory_allocated(device) / 1024**3,
+                "gpu_mem_reserved_gb": torch.cuda.memory_reserved(device) / 1024**3,
+            })
         print(json.dumps({"ts": ts, **metrics}))
 
     distiller.train(
